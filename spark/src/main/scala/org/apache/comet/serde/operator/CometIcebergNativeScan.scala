@@ -227,7 +227,7 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
       fileScanTaskClass: Class[_]): Seq[OperatorOuterClass.IcebergDeleteFile] = {
     try {
       // scalastyle:off classforname
-      val deleteFileClass = Class.forName(IcebergReflection.ClassNames.DELETE_FILE)
+      val deleteFileClass = IcebergReflection.loadClass(IcebergReflection.ClassNames.DELETE_FILE)
       // scalastyle:on classforname
 
       val deletes = IcebergReflection.getDeleteFilesFromTask(task, fileScanTaskClass)
@@ -323,10 +323,10 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
         try {
           // scalastyle:off classforname
           val partitionSpecParserClass =
-            Class.forName(IcebergReflection.ClassNames.PARTITION_SPEC_PARSER)
+            IcebergReflection.loadClass(IcebergReflection.ClassNames.PARTITION_SPEC_PARSER)
           val toJsonMethod = partitionSpecParserClass.getMethod(
             "toJson",
-            Class.forName(IcebergReflection.ClassNames.PARTITION_SPEC))
+            IcebergReflection.loadClass(IcebergReflection.ClassNames.PARTITION_SPEC))
           // scalastyle:on classforname
           val partitionSpecJson = toJsonMethod
             .invoke(null, spec)
@@ -671,7 +671,7 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
   private def convertIcebergLiteral(icebergLiteral: Any, sparkType: DataType): Literal = {
     // Load Literal interface to get value() method (use interface to avoid package-private issues)
     // scalastyle:off classforname
-    val literalClass = Class.forName(IcebergReflection.ClassNames.LITERAL)
+    val literalClass = IcebergReflection.loadClass(IcebergReflection.ClassNames.LITERAL)
     // scalastyle:on classforname
     val valueMethod = literalClass.getMethod("value")
     val value = valueMethod.invoke(icebergLiteral)
@@ -772,11 +772,16 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
 
     // Load Iceberg classes once (avoid repeated class loading in loop)
     // scalastyle:off classforname
-    val contentScanTaskClass = Class.forName(IcebergReflection.ClassNames.CONTENT_SCAN_TASK)
-    val fileScanTaskClass = Class.forName(IcebergReflection.ClassNames.FILE_SCAN_TASK)
-    val contentFileClass = Class.forName(IcebergReflection.ClassNames.CONTENT_FILE)
-    val schemaParserClass = Class.forName(IcebergReflection.ClassNames.SCHEMA_PARSER)
-    val schemaClass = Class.forName(IcebergReflection.ClassNames.SCHEMA)
+    val contentScanTaskClass =
+      IcebergReflection.loadClass(IcebergReflection.ClassNames.CONTENT_SCAN_TASK)
+    val fileScanTaskClass =
+      IcebergReflection.loadClass(IcebergReflection.ClassNames.FILE_SCAN_TASK)
+    val contentFileClass =
+      IcebergReflection.loadClass(IcebergReflection.ClassNames.CONTENT_FILE)
+    val schemaParserClass =
+      IcebergReflection.loadClass(IcebergReflection.ClassNames.SCHEMA_PARSER)
+    val schemaClass =
+      IcebergReflection.loadClass(IcebergReflection.ClassNames.SCHEMA)
     // scalastyle:on classforname
 
     // Cache method lookups (avoid repeated getMethod in loop)
