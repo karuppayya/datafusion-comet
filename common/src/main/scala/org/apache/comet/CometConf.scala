@@ -153,6 +153,30 @@ object CometConf extends ShimCometConf {
       .checkValue(v => v > 0, "Data file concurrency limit must be positive")
       .createWithDefault(1)
 
+  val COMET_ICEBERG_CREDENTIAL_PROVIDER_CLASS: OptionalConfigEntry[String] =
+    conf("spark.comet.scan.icebergNative.credentialProvider.class")
+      .category(CATEGORY_SCAN)
+      .doc(
+        "Fully qualified class name of a CometCredentialProvider implementation for " +
+          "dynamic S3 credential refresh during native Iceberg reads. The class must " +
+          "implement org.apache.comet.iceberg.CometCredentialProvider and have a " +
+          "no-arg constructor. When set, the native reader calls back to this provider " +
+          "via JNI to refresh credentials before they expire. When unset, static " +
+          "credentials extracted at plan time are used.")
+      .stringConf
+      .createOptional
+
+  val COMET_ICEBERG_CREDENTIAL_CACHE_TTL: ConfigEntry[Int] =
+    conf("spark.comet.scan.icebergNative.credentialProvider.cacheTtlSeconds")
+      .category(CATEGORY_SCAN)
+      .doc(
+        "Time-to-live in seconds for cached credentials from the JNI credential provider. " +
+          "Credentials are refreshed when they are within this many seconds of expiry. " +
+          "Also used as the validity window for credentials that have no expiry information.")
+      .intConf
+      .checkValue(v => v > 0, "Credential cache TTL must be positive")
+      .createWithDefault(300)
+
   val COMET_CSV_V2_NATIVE_ENABLED: ConfigEntry[Boolean] =
     conf("spark.comet.scan.csv.v2.enabled")
       .category(CATEGORY_TESTING)

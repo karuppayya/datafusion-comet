@@ -29,11 +29,13 @@ import org.apache.spark.sql.catalyst.plans.QueryPlan
 import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, UnknownPartitioning}
 import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.util.AccumulatorV2
 
 import com.google.common.base.Objects
 
+import org.apache.comet.CometConf
 import org.apache.comet.iceberg.CometIcebergNativeScanMetadata
 import org.apache.comet.serde.OperatorOuterClass.Operator
 import org.apache.comet.serde.operator.CometIcebergNativeScan
@@ -219,6 +221,13 @@ case class CometIcebergNativeScanExec(
   override def doExecuteColumnar(): RDD[ColumnarBatch] = {
     val nativeMetrics = CometMetricNode.fromCometPlan(this)
     val serializedPlan = CometExec.serializeNativePlan(nativeOp)
+
+    val credentialProviderBroadcast =
+      CometConf.COMET_ICEBERG_CREDENTIAL_PROVIDER_CLASS.get(SQLConf.get).map { className =>
+        CatalogScopedCredentialProvider
+          .getOrCreate(sparkContext, className, nativeIcebergScanMetadata.allFileIOProperties)
+      }
+
     new CometExecRDD(
       sparkContext,
       inputRDDs = Seq.empty,
@@ -228,7 +237,8 @@ case class CometIcebergNativeScanExec(
       defaultNumPartitions = perPartitionData.length,
       numOutputCols = output.length,
       nativeMetrics = nativeMetrics,
-      subqueries = Seq.empty) {
+      subqueries = Seq.empty,
+      credentialProviderBroadcast = credentialProviderBroadcast) {
       override def compute(split: Partition, context: TaskContext): Iterator[ColumnarBatch] = {
         val res = super.compute(split, context)
         Option(context).foreach(nativeMetrics.reportScanInputMetrics)

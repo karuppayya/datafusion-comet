@@ -560,6 +560,9 @@ abstract class CometNativeExec extends CometExec {
         // Unified RDD creation - CometExecRDD handles all cases
         val subqueries = collectSubqueries(this)
         val hasScanInput = sparkPlans.exists(_.isInstanceOf[CometNativeScanExec])
+
+        val credentialProviderBroadcast = findIcebergCredentialProviderBroadcast(this)
+
         new CometExecRDD(
           sparkContext,
           inputs.toSeq,
@@ -572,7 +575,8 @@ abstract class CometNativeExec extends CometExec {
           subqueries,
           broadcastedHadoopConfForEncryption,
           encryptedFilePaths,
-          shuffleScanIndices) {
+          shuffleScanIndices,
+          credentialProviderBroadcast) {
           override def compute(
               split: Partition,
               context: TaskContext): Iterator[ColumnarBatch] = {
@@ -701,6 +705,21 @@ abstract class CometNativeExec extends CometExec {
       case _ =>
         val results = plan.children.map(findAllPlanData)
         (results.flatMap(_._1).toMap, results.flatMap(_._2).toMap)
+    }
+  }
+
+  private def findIcebergCredentialProviderBroadcast(plan: SparkPlan): Option[
+    org.apache.spark.broadcast.Broadcast[org.apache.comet.iceberg.CometCredentialProvider]] = {
+    plan match {
+      case iceberg: CometIcebergNativeScanExec =>
+        CometConf.COMET_ICEBERG_CREDENTIAL_PROVIDER_CLASS.get(SQLConf.get).map { className =>
+          CatalogScopedCredentialProvider.getOrCreate(
+            sparkContext,
+            className,
+            iceberg.nativeIcebergScanMetadata.allFileIOProperties)
+        }
+      case _ =>
+        plan.children.flatMap(findIcebergCredentialProviderBroadcast).headOption
     }
   }
 

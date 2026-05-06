@@ -380,15 +380,36 @@ case class CometScanRule(session: SparkSession)
             // Extract vended credentials from FileIO (REST catalog credential vending).
             // FileIO properties take precedence over Hadoop-derived properties because
             // they contain per-table credentials vended by the REST catalog.
-            val fileIOProperties = tableOpt
+            val rawFileIOProperties = tableOpt
               .flatMap(IcebergReflection.getFileIOProperties)
-              .map(CometIcebergNativeScan.filterStorageProperties)
               .getOrElse(Map.empty)
+
+            if (rawFileIOProperties.isEmpty) {
+              val fileIOClassName = tableOpt
+                .flatMap(IcebergReflection.getFileIO)
+                .map(_.getClass.getName)
+                .getOrElse("<no-fileio>")
+              logWarning(
+                s"FileIO properties extraction returned empty map for FileIO class " +
+                  s"$fileIOClassName; credential provider will not have access to " +
+                  s"FileIO-vended properties")
+            }
+
+            val fileIOProperties =
+              CometIcebergNativeScan.filterStorageProperties(rawFileIOProperties)
 
             val catalogProperties = hadoopDerivedProperties ++ fileIOProperties
 
-            val result = CometIcebergNativeScanMetadata
-              .extract(scanExec.scan, effectiveLocation, catalogProperties)
+            // Pass all FileIO properties (unfiltered) for credential provider use.
+            // The credential provider needs properties (e.g. tenant-id, table-refresh-id,
+            // falcon-domain) that are filtered out of catalogProperties.
+            val allFileIOProperties = hadoopDerivedProperties ++ rawFileIOProperties
+
+            val result = CometIcebergNativeScanMetadata.extract(
+              scanExec.scan,
+              effectiveLocation,
+              catalogProperties,
+              allFileIOProperties)
 
             result
           } catch {
@@ -815,12 +836,14 @@ object CometScanRule extends Logging {
    * one iteration for better performance with large tables.
    */
   def validateIcebergFileScanTasks(tasks: java.util.List[_]): IcebergTaskValidationResult = {
-    // scalastyle:off classforname
-    val contentScanTaskClass = Class.forName(IcebergReflection.ClassNames.CONTENT_SCAN_TASK)
-    val contentFileClass = Class.forName(IcebergReflection.ClassNames.CONTENT_FILE)
-    val fileScanTaskClass = Class.forName(IcebergReflection.ClassNames.FILE_SCAN_TASK)
-    val unboundPredicateClass = Class.forName(IcebergReflection.ClassNames.UNBOUND_PREDICATE)
-    // scalastyle:on classforname
+    val contentScanTaskClass =
+      IcebergReflection.loadClass(IcebergReflection.ClassNames.CONTENT_SCAN_TASK)
+    val contentFileClass =
+      IcebergReflection.loadClass(IcebergReflection.ClassNames.CONTENT_FILE)
+    val fileScanTaskClass =
+      IcebergReflection.loadClass(IcebergReflection.ClassNames.FILE_SCAN_TASK)
+    val unboundPredicateClass =
+      IcebergReflection.loadClass(IcebergReflection.ClassNames.UNBOUND_PREDICATE)
 
     // Cache all method lookups outside the loop
     val fileMethod = contentScanTaskClass.getMethod("file")

@@ -272,21 +272,39 @@ object IcebergReflection extends Logging {
    * credential vending. The REST catalog returns temporary S3 credentials per-table via the
    * loadTable response, stored in the table's FileIO (typically ResolvingFileIO).
    *
-   * The properties() method is not on the FileIO interface -- it exists on specific
-   * implementations like ResolvingFileIO and S3FileIO. Returns None gracefully when unavailable.
+   * `properties()` is not declared on the FileIO interface -- it exists on specific
+   * implementations like ResolvingFileIO and S3FileIO. Returns None gracefully when the method is
+   * absent or returns no usable string-keyed entries.
    */
   def getFileIOProperties(table: Any): Option[Map[String, String]] = {
     import scala.jdk.CollectionConverters._
     getFileIO(table).flatMap { fileIO =>
-      findMethodInHierarchy(fileIO.getClass, "properties").flatMap { propsMethod =>
-        propsMethod.invoke(fileIO) match {
-          case javaMap: java.util.Map[_, _] =>
-            val scalaMap = javaMap.asScala.collect { case (k: String, v: String) =>
-              k -> v
-            }.toMap
-            if (scalaMap.nonEmpty) Some(scalaMap) else None
-          case _ => None
-        }
+      invokeNoArgMethod(fileIO, "properties").flatMap {
+        case javaMap: java.util.Map[_, _] =>
+          val scalaMap = javaMap.asScala.collect { case (k: String, v: String) =>
+            k -> v
+          }.toMap
+          if (scalaMap.nonEmpty) Some(scalaMap) else None
+        case _ => None
+      }
+    }
+  }
+
+  /**
+   * Invokes a no-arg method by name on the given object, searching the class hierarchy. Returns
+   * Some(result) where result may be null. Returns None only if the method doesn't exist or
+   * invocation throws.
+   */
+  private def invokeNoArgMethod(obj: Any, methodName: String): Option[Any] = {
+    findMethodInHierarchy(obj.getClass, methodName).flatMap { method =>
+      try {
+        Some(method.invoke(obj))
+      } catch {
+        case e: Exception =>
+          logWarning(
+            s"Exception invoking ${obj.getClass.getName}.$methodName(): " +
+              s"${e.getClass.getName}: ${e.getMessage}")
+          None
       }
     }
   }
@@ -608,7 +626,9 @@ object IcebergReflection extends Logging {
  * @param globalFieldIdMapping
  *   Mapping from column names to Iceberg field IDs (built from scanSchema)
  * @param catalogProperties
- *   Catalog properties for FileIO (S3 credentials, regions, etc.)
+ *   Catalog properties for FileIO (S3 credentials, regions, etc.) - filtered to storage prefixes
+ * @param allFileIOProperties
+ *   Unfiltered FileIO properties for credential provider (includes tenant-id, refresh-id, etc.)
  */
 case class CometIcebergNativeScanMetadata(
     table: Any,
@@ -619,6 +639,7 @@ case class CometIcebergNativeScanMetadata(
     tableSchema: Any,
     globalFieldIdMapping: Map[String, Int],
     catalogProperties: Map[String, String],
+    allFileIOProperties: Map[String, String],
     fileFormat: String)
 
 object CometIcebergNativeScanMetadata extends Logging {
@@ -641,7 +662,9 @@ object CometIcebergNativeScanMetadata extends Logging {
   def extract(
       scan: Any,
       metadataLocation: String,
-      catalogProperties: Map[String, String]): Option[CometIcebergNativeScanMetadata] = {
+      catalogProperties: Map[String, String],
+      allFileIOProperties: Map[String, String] = Map.empty)
+      : Option[CometIcebergNativeScanMetadata] = {
     import org.apache.comet.iceberg.IcebergReflection._
 
     for {
@@ -674,6 +697,7 @@ object CometIcebergNativeScanMetadata extends Logging {
         tableSchema = tableSchema,
         globalFieldIdMapping = globalFieldIdMapping,
         catalogProperties = catalogProperties,
+        allFileIOProperties = allFileIOProperties,
         fileFormat = FileFormats.PARQUET)
     }
   }

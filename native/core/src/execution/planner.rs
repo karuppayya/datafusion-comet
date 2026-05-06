@@ -164,6 +164,9 @@ pub struct PhysicalPlanner {
     partition: i32,
     session_ctx: Arc<SessionContext>,
     query_context_registry: Arc<datafusion_comet_spark_expr::QueryContextMap>,
+    /// Optional JNI credential provider for dynamic S3 credential refresh
+    credential_provider: Option<Arc<jni::objects::Global<jni::objects::JObject<'static>>>>,
+    credential_cache_ttl_secs: u64,
 }
 
 impl Default for PhysicalPlanner {
@@ -179,7 +182,22 @@ impl PhysicalPlanner {
             session_ctx,
             partition,
             query_context_registry: datafusion_comet_spark_expr::create_query_context_map(),
+            credential_provider: None,
+            credential_cache_ttl_secs: 300,
         }
+    }
+
+    pub fn with_credential_provider(
+        mut self,
+        provider: Option<Arc<jni::objects::Global<jni::objects::JObject<'static>>>>,
+    ) -> Self {
+        self.credential_provider = provider;
+        self
+    }
+
+    pub fn with_credential_cache_ttl_secs(mut self, ttl_secs: u64) -> Self {
+        self.credential_cache_ttl_secs = ttl_secs;
+        self
     }
 
     pub fn with_exec_id(self, exec_context_id: i64) -> Self {
@@ -188,6 +206,8 @@ impl PhysicalPlanner {
             partition: self.partition,
             session_ctx: Arc::clone(&self.session_ctx),
             query_context_registry: Arc::clone(&self.query_context_registry),
+            credential_provider: self.credential_provider,
+            credential_cache_ttl_secs: self.credential_cache_ttl_secs,
         }
     }
 
@@ -1426,12 +1446,40 @@ impl PhysicalPlanner {
                 let tasks = parse_file_scan_tasks_from_common(common, &scan.file_scan_tasks)?;
                 let data_file_concurrency_limit = common.data_file_concurrency_limit as usize;
 
+                let credential_loader = match self.credential_provider.as_ref() {
+                    None => None,
+                    Some(provider) => {
+                        use crate::execution::jni_credential_loader::JniAwsCredentialLoader;
+                        use iceberg_storage_opendal::CustomAwsCredentialLoader;
+
+                        let table_location = derive_table_location(&metadata_location).to_string();
+
+                        // Fail the plan if we cannot bind to the JVM-side provider.
+                        let loader = JniAwsCredentialLoader::new(
+                            Arc::clone(provider),
+                            table_location,
+                            std::time::Duration::from_secs(self.credential_cache_ttl_secs),
+                        )
+                        .map_err(|e| {
+                            GeneralError(format!(
+                                "Failed to create JNI credential loader for Iceberg scan. \
+                                 Check that the configured \
+                                 spark.comet.scan.icebergNative.credentialProvider.class \
+                                 is on the executor classpath and implements the current \
+                                 resolveCredentials(ResolveContext) SPI. Underlying error: {e}"
+                            ))
+                        })?;
+                        Some(CustomAwsCredentialLoader::new(Arc::new(loader)))
+                    }
+                };
+
                 let iceberg_scan = IcebergScanExec::new(
                     metadata_location,
                     required_schema,
                     catalog_properties,
                     tasks,
                     data_file_concurrency_limit,
+                    credential_loader,
                 )?;
 
                 Ok((
@@ -3842,6 +3890,23 @@ fn needs_fields_coercion(sig: &TypeSignature) -> bool {
     }
 }
 
+/// Derive the table base location from an Iceberg metadata location.
+///
+/// Mirrors the JVM-side `CredentialProviderConfig.deriveTableLocation` so the native side
+/// produces the same `tableLocation` string that the catalog-scoped credential provider
+/// expects when dispatching internally per-table.
+///
+/// Examples:
+///   `s3://bucket/db/table/metadata/v1.metadata.json` → `s3://bucket/db/table`
+///   `s3://bucket/db/table/metadata/snap-123.avro`    → `s3://bucket/db/table`
+///   `s3://bucket/db/table`                            → `s3://bucket/db/table` (unchanged)
+fn derive_table_location(metadata_location: &str) -> &str {
+    match metadata_location.find("/metadata/") {
+        Some(idx) if idx > 0 => &metadata_location[..idx],
+        _ => metadata_location,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use futures::{poll, StreamExt};
@@ -3882,6 +3947,54 @@ mod tests {
         spark_operator::{operator::OpStruct, Operator},
     };
     use datafusion_comet_spark_expr::EvalMode;
+
+    use super::derive_table_location;
+
+    #[test]
+    fn test_derive_table_location_strips_metadata_suffix() {
+        assert_eq!(
+            derive_table_location("s3://bucket/db/table/metadata/v1.metadata.json"),
+            "s3://bucket/db/table"
+        );
+        assert_eq!(
+            derive_table_location("s3://bucket/db/table/metadata/snap-123.avro"),
+            "s3://bucket/db/table"
+        );
+    }
+
+    #[test]
+    fn test_derive_table_location_preserves_input_without_metadata_segment() {
+        assert_eq!(
+            derive_table_location("s3://bucket/db/table"),
+            "s3://bucket/db/table"
+        );
+        assert_eq!(
+            derive_table_location("/local/path/table"),
+            "/local/path/table"
+        );
+    }
+
+    #[test]
+    fn test_derive_table_location_handles_alternate_schemes() {
+        assert_eq!(
+            derive_table_location("s3a://bucket/db/table/metadata/v1.metadata.json"),
+            "s3a://bucket/db/table"
+        );
+        assert_eq!(
+            derive_table_location("file:///tmp/warehouse/table/metadata/v1.metadata.json"),
+            "file:///tmp/warehouse/table"
+        );
+    }
+
+    #[test]
+    fn test_derive_table_location_rejects_leading_metadata_segment() {
+        // `idx > 0` guard: a metadata_location starting with "/metadata/" must not be truncated
+        // to the empty string.
+        assert_eq!(
+            derive_table_location("/metadata/v1.metadata.json"),
+            "/metadata/v1.metadata.json"
+        );
+    }
 
     #[test]
     fn test_unpack_dictionary_primitive() {

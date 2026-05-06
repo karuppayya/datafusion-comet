@@ -98,7 +98,8 @@ use crate::execution::tracing::{
 use crate::execution::memory_pools::logging_pool::LoggingMemoryPool;
 use crate::execution::spark_config::{
     SparkConfig, COMET_DEBUG_ENABLED, COMET_DEBUG_MEMORY, COMET_EXPLAIN_NATIVE_ENABLED,
-    COMET_MAX_TEMP_DIRECTORY_SIZE, COMET_TRACING_ENABLED, SPARK_EXECUTOR_CORES,
+    COMET_ICEBERG_CREDENTIAL_CACHE_TTL, COMET_MAX_TEMP_DIRECTORY_SIZE, COMET_TRACING_ENABLED,
+    SPARK_EXECUTOR_CORES,
 };
 use crate::parquet::encryption_support::{CometEncryptionFactory, ENCRYPTION_FACTORY_ID};
 use datafusion_comet_proto::spark_operator::operator::OpStruct;
@@ -293,6 +294,10 @@ struct ExecutionContext {
     pub debug_native: bool,
     /// Whether to write native plans with metrics to stdout
     pub explain_native: bool,
+    /// Optional JNI credential provider for dynamic S3 credential refresh (Iceberg native reads)
+    pub credential_provider: Option<Arc<Global<JObject<'static>>>>,
+    /// Credential cache TTL in seconds for the JNI credential provider
+    pub credential_cache_ttl_secs: u64,
     /// Memory pool config
     pub memory_pool_config: MemoryPoolConfig,
     /// Whether to log memory usage on each call to execute_plan
@@ -329,6 +334,7 @@ pub unsafe extern "system" fn Java_org_apache_comet_Native_createPlan(
     task_attempt_id: jlong,
     task_cpus: jlong,
     key_unwrapper_obj: JObject,
+    credential_provider_obj: JObject,
 ) -> jlong {
     try_unwrap_or_throw(&e, |env| {
         // Deserialize Spark configs
@@ -348,6 +354,8 @@ pub unsafe extern "system" fn Java_org_apache_comet_Native_createPlan(
         let max_temp_directory_size =
             spark_config.get_u64(COMET_MAX_TEMP_DIRECTORY_SIZE, 100 * 1024 * 1024 * 1024);
         let logging_memory_pool = spark_config.get_bool(COMET_DEBUG_MEMORY);
+        let credential_cache_ttl_secs =
+            spark_config.get_u64(COMET_ICEBERG_CREDENTIAL_CACHE_TTL, 300);
 
         with_trace("createPlan", tracing_enabled, || {
             // Init JVM classes
@@ -431,6 +439,13 @@ pub unsafe extern "system" fn Java_org_apache_comet_Native_createPlan(
                 );
             }
 
+            // Handle credential provider for Iceberg native reads
+            let credential_provider = if !credential_provider_obj.is_null() {
+                Some(Arc::new(jni_new_global_ref!(env, credential_provider_obj)?))
+            } else {
+                None
+            };
+
             let session = Arc::new(session);
 
             // Register this context's memory pool so we can sum all pools
@@ -469,6 +484,8 @@ pub unsafe extern "system" fn Java_org_apache_comet_Native_createPlan(
                 session_ctx: session,
                 debug_native,
                 explain_native,
+                credential_provider,
+                credential_cache_ttl_secs,
                 memory_pool_config,
                 tracing_enabled,
                 rust_thread_id,
@@ -478,7 +495,7 @@ pub unsafe extern "system" fn Java_org_apache_comet_Native_createPlan(
                 tracing_event_name,
             });
 
-            Ok(Box::into_raw(exec_context) as i64)
+            Ok(Box::into_raw(Comeexec_context) as i64)
         })
     })
 }
@@ -697,7 +714,9 @@ pub unsafe extern "system" fn Java_org_apache_comet_Native_executePlan(
                 let start = Instant::now();
                 let planner =
                     PhysicalPlanner::new(Arc::clone(&exec_context.session_ctx), partition)
-                        .with_exec_id(exec_context_id);
+                        .with_exec_id(exec_context_id)
+                        .with_credential_provider(exec_context.credential_provider.clone())
+                        .with_credential_cache_ttl_secs(exec_context.credential_cache_ttl_secs);
                 let (scans, shuffle_scans, root_op) = planner.create_plan(
                     &exec_context.spark_plan,
                     &mut exec_context.input_sources.clone(),

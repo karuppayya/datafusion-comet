@@ -24,6 +24,7 @@ import java.nio.ByteBuffer
 import org.apache.spark.CometTaskMemoryManager
 import org.apache.spark.sql.comet.CometMetricNode
 
+import org.apache.comet.iceberg.CometCredentialProvider
 import org.apache.comet.parquet.CometFileKeyUnwrapper
 
 class Native extends NativeBase {
@@ -69,7 +70,8 @@ class Native extends NativeBase {
       memoryLimitPerTask: Long,
       taskAttemptId: Long,
       taskCPUs: Long,
-      keyUnwrapper: CometFileKeyUnwrapper): Long
+      keyUnwrapper: CometFileKeyUnwrapper,
+      credentialProvider: CometCredentialProvider): Long
   // scalastyle:on
 
   /**
